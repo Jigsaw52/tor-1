@@ -26,5 +26,6 @@ int path_is_relative(const char *filename);
 void clean_fname_for_stat(char *name);
 int get_parent_directory(char *fname);
 char *make_path_absolute(const char *fname);
+struct smartlist_t *tor_glob(const char *pattern);
 
 #endif /* !defined(TOR_PATH_H) */
