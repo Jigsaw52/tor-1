@@ -24,13 +24,6 @@
 #define PATH_SEPARATOR "/"
 #endif
 
-#ifdef _WIN32
-#define IS_GLOB_CHAR(s,i) (((s)[(i)]) == '*' || ((s)[(i)]) == '?')
-#else
-#define IS_GLOB_CHAR(s,i) ((((s)[(i)]) == '*' || ((s)[(i)]) == '?') &&\
-                           ((i) == 0 || (s)[(i)-1] != '\\')) /* check escape */
-#endif
-
 char *get_unquoted_path(const char *path);
 char *expand_filename(const char *filename);
 int path_is_relative(const char *filename);
@@ -40,12 +33,5 @@ char *make_path_absolute(const char *fname);
 struct smartlist_t *tor_glob(const char *pattern);
 bool has_glob(const char *s);
 struct smartlist_t *get_glob_opened_files(const char *pattern);
-#ifdef _WIN32
-void copy_path(TCHAR *dst, const char *src, size_t len);
-struct smartlist_t *get_files_in_folder(HANDLE handle,
-                                        WIN32_FIND_DATA *findData,
-                                        TCHAR *tpattern, const char *pattern,
-                                        bool use_fullpath);
-#endif /* defined(_WIN32) */
 
 #endif /* !defined(TOR_PATH_H) */

@@ -11,7 +11,6 @@
 
 #include "lib/fs/mmap.h"
 #include "lib/fs/files.h"
-#include "lib/fs/path.h"
 #include "lib/log/log.h"
 #include "lib/log/util_bug.h"
 #include "lib/log/win32err.h"
@@ -143,7 +142,11 @@ tor_mmap_file,(const char *filename))
   DWORD size_low, size_high;
   uint64_t real_size;
   res->mmap_handle = NULL;
-  copy_path(tfilename, filename, MAX_PATH);
+#ifdef UNICODE
+  mbstowcs(tfilename,filename,MAX_PATH);
+#else
+  strlcpy(tfilename,filename,MAX_PATH);
+#endif
   file_handle = CreateFile(tfilename,
                            GENERIC_READ, FILE_SHARE_READ,
                            NULL,
