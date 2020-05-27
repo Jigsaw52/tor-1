@@ -144,12 +144,12 @@ if res != '250 OK':
 
 # test configuration file values and order
 control_socket.sendall('GETCONF RecommendedVersions\r\n'.encode('ascii'))
-check_control_list(control_out_file, ['1', '2', '3', '4'], 'RecommendedVersions')
+check_control_list(control_out_file, ['1', '2', '3', '4', '5', '6', '4' , '5'], 'RecommendedVersions')
 
 # test reloading the configuration file with seccomp sandbox enabled
-four_path = os.path.join(torrc_dir, 'torrc.d', 'folder', '04_four.conf')
-with open(four_path, 'a') as four:
-    four.write('RecommendedVersions 5')
+foo_path = os.path.join(torrc_dir, 'torrc.d', 'foo')
+with open(foo_path, 'a') as foo:
+    foo.write('RecommendedVersions 7')
 
 control_socket.sendall('SIGNAL RELOAD\r\n'.encode('ascii'))
 wait_for_log('Reloading config and resetting internal state.')
@@ -160,7 +160,7 @@ if res != '250 OK':
 
 
 control_socket.sendall('GETCONF RecommendedVersions\r\n'.encode('ascii'))
-check_control_list(control_out_file, ['1', '2', '3', '4', '5'], 'RecommendedVersions')
+check_control_list(control_out_file, ['1', '2', '3', '4', '5', '6', '7', '4' , '5'], 'RecommendedVersions')
 
 # test that config-can-saveconf is 0 because we have a %include
 control_socket.sendall('getinfo config-can-saveconf\r\n'.encode('ascii'))
