@@ -814,6 +814,7 @@ dnl Where do you live, libevent?  And how do we call you?
 if test "$bwin32" = "true"; then
   TOR_LIB_WS32=-lws2_32
   TOR_LIB_IPHLPAPI=-liphlpapi
+  TOR_LIB_SHLWAPI=-lshlwapi
   # Some of the cargo-cults recommend -lwsock32 as well, but I don't
   # think it's actually necessary.
   TOR_LIB_GDI=-lgdi32
@@ -826,6 +827,7 @@ fi
 AC_SUBST(TOR_LIB_WS32)
 AC_SUBST(TOR_LIB_GDI)
 AC_SUBST(TOR_LIB_IPHLPAPI)
+AC_SUBST(TOR_LIB_SHLWAPI)
 AC_SUBST(TOR_LIB_USERENV)
 
 tor_libevent_pkg_redhat="libevent"
@@ -1598,7 +1600,8 @@ AC_CHECK_HEADERS([errno.h \
 		  sys/utime.h \
 		  sys/wait.h \
 		  syslog.h \
-		  utime.h])
+		  utime.h \
+		  glob.h])
 
 AC_CHECK_HEADERS(sys/param.h)
 

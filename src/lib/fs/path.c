@@ -13,17 +13,42 @@
 #include "lib/malloc/malloc.h"
 #include "lib/log/log.h"
 #include "lib/log/util_bug.h"
+#include "lib/container/smartlist.h"
+#include "lib/sandbox/sandbox.h"
 #include "lib/string/printf.h"
 #include "lib/string/util_string.h"
 #include "lib/string/compat_ctype.h"
+#include "lib/fs/files.h"
+#include "lib/fs/dir.h"
 #include "lib/fs/userdb.h"
 
+#ifdef HAVE_SYS_TYPES_H
+#include <sys/types.h>
+#endif
+#ifdef HAVE_SYS_STAT_H
+#include <sys/stat.h>
+#endif
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#include <shlwapi.h>
+#else /* !(defined(_WIN32)) */
+#include <dirent.h>
+#include <glob.h>
+#endif /* defined(_WIN32) */
+
 #include <errno.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define IS_GLOB_CHAR(s,i) (((s)[(i)]) == '*' || ((s)[(i)]) == '?')
+#else
+#define IS_GLOB_CHAR(s,i) ((((s)[(i)]) == '*' || ((s)[(i)]) == '?') &&\
+                           ((i) == 0 || (s)[(i)-1] != '\\')) /* check escape */
+#endif
 
 /** Removes enclosing quotes from <b>path</b> and unescapes quotes between the
  * enclosing quotes. Backslashes are not unescaped. Return the unquoted
@@ -293,4 +318,207 @@ make_path_absolute(const char *fname)
   }
   return absfname;
 #endif /* defined(_WIN32) */
+}
+
+#ifndef _WIN32
+/** Same as opendir but calls sandbox_intern_string before */
+static DIR *
+prot_opendir(const char *name)
+{
+  return opendir(sandbox_intern_string(name));
+}
+
+/** Same as stat but calls sandbox_intern_string before */
+static int
+prot_stat(const char *pathname, struct stat *buf)
+{
+  return stat(sandbox_intern_string(pathname), buf);
+}
+
+/** Same as lstat but calls sandbox_intern_string before */
+static int
+prot_lstat(const char *pathname, struct stat *buf)
+{
+  return lstat(sandbox_intern_string(pathname), buf);
+}
+#endif /* !(defined(_WIN32)) */
+
+#ifdef _WIN32
+static struct smartlist_t *
+unglob_win32(const char *pattern, int prev_sep, int curr_sep)
+{
+  smartlist_t *results = smartlist_new();
+  int len = prev_sep < 1 ? prev_sep + 1 : prev_sep; // handle /*
+  char *path_until_glob = tor_strndup(pattern, len);
+
+  if (!is_file(file_status(path_until_glob))) {
+    smartlist_t *filenames = tor_listdir(path_until_glob);
+    if (!filenames) {
+      smartlist_free(results);
+      results = NULL;
+    } else {
+      SMARTLIST_FOREACH_BEGIN(filenames, char *, filename) {
+        char *full_path;
+        tor_asprintf(&full_path, "%s"PATH_SEPARATOR"%s",
+                     path_until_glob, filename);
+        char *path_curr_glob = tor_strndup(pattern, curr_sep + 1);
+        if (is_dir(file_status(full_path))) {
+          clean_fname_for_stat(path_curr_glob);
+        }
+        if (PathMatchSpec(full_path, path_curr_glob)) {
+          smartlist_add(results, full_path);
+        } else {
+          tor_free(full_path);
+        }
+        tor_free(path_curr_glob);
+      } SMARTLIST_FOREACH_END(filename);
+      SMARTLIST_FOREACH(filenames, char *, p, tor_free(p));
+      smartlist_free(filenames);
+    }
+  }
+  tor_free(path_until_glob);
+  return results;
+}
+#endif  /* defined(_WIN32) */
+
+static bool
+add_non_glob_path(const char *path, struct smartlist_t *results)
+{
+  file_status_t file_type = file_status(path);
+  if (file_type == FN_ERROR) {
+    return false;
+  } else if (file_type != FN_NOENT) {
+    char *to_add = tor_strdup(path);
+    clean_fname_for_stat(to_add);
+    smartlist_add(results, to_add);
+  }
+  return true;
+}
+
+#ifdef _WIN32
+static struct smartlist_t *
+tor_glob_win32(const char *pattern)
+{
+  smartlist_t *results = smartlist_new();
+  int i, prev_sep = -1, curr_sep = -1;
+  bool is_glob = false, error_found = false, is_sep = false, is_last = false;
+
+  // search for first path fragment with globs
+  for (i = 0; pattern[i]; i++) {
+    is_glob = is_glob || IS_GLOB_CHAR(pattern, i);
+    is_last = !pattern[i+1];
+    is_sep = pattern[i] == *PATH_SEPARATOR || pattern[i] == '/';
+    if (is_sep || is_last) {
+      prev_sep = curr_sep;
+      curr_sep = i;
+      if (is_glob) {
+        break;
+      }
+    }
+  }
+
+  if (!is_glob) {
+    if (!add_non_glob_path(pattern, results)) {
+      SMARTLIST_FOREACH(results, char *, p, tor_free(p));
+      smartlist_free(results);
+      results = NULL;
+    }
+    return results;
+  }
+
+  smartlist_t *unglobbed_paths = unglob_win32(pattern, prev_sep, curr_sep);
+  if (!unglobbed_paths) {
+    error_found = true;
+  } else {
+    // for each path for current fragment, add the rest of the pattern
+    // and call recursively to get all opened paths
+    SMARTLIST_FOREACH_BEGIN(unglobbed_paths, char *, current_path) {
+      char *next_path;
+      tor_asprintf(&next_path, "%s"PATH_SEPARATOR"%s", current_path,
+                   &pattern[curr_sep+1]);
+      smartlist_t *opened_next = tor_glob_win32(next_path);
+      tor_free(next_path);
+      if (!opened_next) {
+        error_found = true;
+        break;
+      }
+      smartlist_add_all(results, opened_next);
+      smartlist_free(opened_next);
+    } SMARTLIST_FOREACH_END(current_path);
+    SMARTLIST_FOREACH(unglobbed_paths, char *, p, tor_free(p));
+    smartlist_free(unglobbed_paths);
+  }
+
+  if (error_found) {
+    SMARTLIST_FOREACH(results, char *, p, tor_free(p));
+    smartlist_free(results);
+    results = NULL;
+  }
+
+  return results;
+}
+#endif /* defined(_WIN32) */
+
+/** Return a new list containing the paths that match the pattern
+ * <b>pattern</b>. Return NULL on error.
+ */
+struct smartlist_t *
+tor_glob(const char *pattern)
+{
+  smartlist_t *result;
+#ifdef _WIN32
+  // PathMatchSpec does not support forward slashes, change them to backslashes
+  char *pattern_normalized = tor_strdup(pattern);
+  tor_strreplacechar(pattern_normalized, '/', *PATH_SEPARATOR);
+  result = tor_glob_win32(pattern_normalized);
+  tor_free(pattern_normalized);
+#else /* !(defined(_WIN32)) */
+  glob_t matches;
+  int flags = GLOB_ERR | GLOB_NOSORT;
+#ifdef GLOB_ALTDIRFUNC
+  /* use functions that call sandbox_intern_string */
+  flags |= GLOB_ALTDIRFUNC;
+  typedef void *(*gl_opendir)(const char * name);
+  typedef struct dirent *(*gl_readdir)(void *);
+  typedef void (*gl_closedir)(void *);
+  matches.gl_opendir = (gl_opendir) &prot_opendir;
+  matches.gl_readdir = (gl_readdir) &readdir;
+  matches.gl_closedir = (gl_closedir) &closedir;
+  matches.gl_stat = &prot_stat;
+  matches.gl_lstat = &prot_lstat;
+#endif /* defined(GLOB_ALTDIRFUNC) */
+  int ret = glob(pattern, flags, NULL, &matches);
+  if (ret == GLOB_NOMATCH) {
+    return smartlist_new();
+  } else if (ret != 0) {
+    return NULL;
+  }
+
+  result = smartlist_new();
+  size_t i;
+  for (i = 0; i < matches.gl_pathc; i++) {
+    char *match = tor_strdup(matches.gl_pathv[i]);
+    size_t len = strlen(match);
+    if (len > 0 && match[len-1] == *PATH_SEPARATOR) {
+      match[len-1] = '\0';
+    }
+    smartlist_add(result, match);
+  }
+  globfree(&matches);
+#endif /* defined(_WIN32) */
+  return result;
+}
+
+/** Returns true if <b>s</b> contains characters that can be globbed.
+ * Returns false otherwise. */
+bool
+has_glob(const char *s)
+{
+  int i;
+  for (i = 0; s[i]; i++) {
+    if (IS_GLOB_CHAR(s, i)) {
+      return true;
+    }
+  }
+  return false;
 }
