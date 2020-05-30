@@ -522,3 +522,97 @@ has_glob(const char *s)
   }
   return false;
 }
+
+static struct smartlist_t *
+unglob_posix(const char *pattern, int prev_sep, int curr_sep)
+{
+  (void)prev_sep;
+  smartlist_t *results = smartlist_new();
+  // if the following fragments have no globs, we're done
+  if (has_glob(&pattern[curr_sep+1])) {
+    // unglob current fragment
+    char *glob_path = tor_strndup(pattern, curr_sep);
+    smartlist_t *child_paths = tor_glob(glob_path);
+    tor_free(glob_path);
+    if (!child_paths) {
+      smartlist_free(results);
+      results = NULL;
+    } else {
+      smartlist_add_all(results, child_paths);
+      smartlist_free(child_paths);
+    }
+  }
+  return results;
+}
+
+/** Returns a list of files that are opened by the tor_glob function when
+ * called with <b>pattern</b>. Returns NULL on error. The purpose of this
+ * function is to create a list of files to be added to the sandbox white list
+ * before the sandbox is enabled. */
+struct smartlist_t *
+get_glob_opened_files(const char *pattern)
+{
+  smartlist_t *results = smartlist_new();
+  int i, prev_sep = -1, curr_sep = -1;
+  bool is_glob = false, error_found = false, is_sep = false, is_last = false;
+
+  // search for first path fragment with globs
+  for (i = 0; pattern[i]; i++) {
+    is_glob = is_glob || IS_GLOB_CHAR(pattern, i);
+    is_last = !pattern[i+1];
+    is_sep = pattern[i] == *PATH_SEPARATOR || pattern[i] == '/';
+    if (is_sep || is_last) {
+      prev_sep = curr_sep;
+      curr_sep = i;
+      if (is_glob) {
+        break;
+      }
+    }
+  }
+
+  if (!is_glob) {
+    return results;
+  }
+
+  // add path before the glob to results
+  int len = prev_sep < 1 ? prev_sep + 1 : prev_sep; // handle /*
+  char *path_until_glob = tor_strndup(pattern, len);
+  smartlist_add(results, path_until_glob);
+
+  smartlist_t *unglobbed_paths = unglob_posix(pattern, prev_sep, curr_sep);
+  if (!unglobbed_paths) {
+    error_found = true;
+  } else {
+    // for each path for current fragment, add the rest of the pattern
+    // and call recursively to get all opened paths
+    SMARTLIST_FOREACH_BEGIN(unglobbed_paths, char *, current_path) {
+      if (!is_dir(file_status(current_path))) {
+        // file_status needs the string interned or we get a warning
+        smartlist_add_strdup(results, current_path);
+        continue;
+      }
+
+      char *next_path;
+      tor_asprintf(&next_path, "%s"PATH_SEPARATOR"%s", current_path,
+                   &pattern[curr_sep+1]);
+      smartlist_t *opened_next = get_glob_opened_files(next_path);
+      tor_free(next_path);
+      if (!opened_next) {
+        error_found = true;
+        break;
+      }
+      smartlist_add_all(results, opened_next);
+      smartlist_free(opened_next);
+    } SMARTLIST_FOREACH_END(current_path);
+    SMARTLIST_FOREACH(unglobbed_paths, char *, p, tor_free(p));
+    smartlist_free(unglobbed_paths);
+  }
+
+  if (error_found) {
+    SMARTLIST_FOREACH(results, char *, p, tor_free(p));
+    smartlist_free(results);
+    results = NULL;
+  }
+
+  return results;
+}
