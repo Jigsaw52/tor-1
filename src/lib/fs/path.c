@@ -320,28 +320,97 @@ make_path_absolute(const char *fname)
 #endif /* defined(_WIN32) */
 }
 
-#ifndef _WIN32
-/** Same as opendir but calls sandbox_intern_string before */
-static DIR *
-prot_opendir(const char *name)
+typedef struct smartlist_t * unglob_fn(const char *pattern, int prev_sep,
+                                       int curr_sep);
+
+static bool
+add_non_glob_path(const char *path, struct smartlist_t *results)
 {
-  return opendir(sandbox_intern_string(name));
+  file_status_t file_type = file_status(path);
+  if (file_type == FN_ERROR) {
+    return false;
+  } else if (file_type != FN_NOENT) {
+    char *to_add = tor_strdup(path);
+    clean_fname_for_stat(to_add);
+    smartlist_add(results, to_add);
+  }
+  return true;
 }
 
-/** Same as stat but calls sandbox_intern_string before */
-static int
-prot_stat(const char *pathname, struct stat *buf)
+static struct smartlist_t *
+get_glob_paths(const char *pattern, unglob_fn unglob, bool final)
 {
-  return stat(sandbox_intern_string(pathname), buf);
-}
+  smartlist_t *results = smartlist_new();
+  int i, prev_sep = -1, curr_sep = -1;
+  bool is_glob = false, error_found = false, is_sep = false, is_last = false;
 
-/** Same as lstat but calls sandbox_intern_string before */
-static int
-prot_lstat(const char *pathname, struct stat *buf)
-{
-  return lstat(sandbox_intern_string(pathname), buf);
+  // search for first path fragment with globs
+  for (i = 0; pattern[i]; i++) {
+    is_glob = is_glob || IS_GLOB_CHAR(pattern, i);
+    is_last = !pattern[i+1];
+    is_sep = pattern[i] == *PATH_SEPARATOR || pattern[i] == '/';
+    if (is_sep || is_last) {
+      prev_sep = curr_sep;
+      curr_sep = i;
+      if (is_glob) {
+        break;
+      }
+    }
+  }
+
+  if (!is_glob) {
+    if (final && !add_non_glob_path(pattern, results)) {
+      SMARTLIST_FOREACH(results, char *, p, tor_free(p));
+      smartlist_free(results);
+      results = NULL;
+    }
+    return results;
+  }
+
+  if (!final) {
+    // add path before the glob to results
+    int len = prev_sep < 1 ? prev_sep + 1 : prev_sep; // handle /*
+    char *path_until_glob = tor_strndup(pattern, len);
+    smartlist_add(results, path_until_glob);
+  }
+
+  smartlist_t *unglobbed_paths = unglob(pattern, prev_sep, curr_sep);
+  if (!unglobbed_paths) {
+    error_found = true;
+  } else {
+    // for each path for current fragment, add the rest of the pattern
+    // and call recursively to get all opened paths
+    SMARTLIST_FOREACH_BEGIN(unglobbed_paths, char *, current_path) {
+      if (!final && !is_dir(file_status(current_path))) {
+        // file_status needs the string interned or we get a warning
+        smartlist_add_strdup(results, current_path);
+        continue;
+      }
+
+      char *next_path;
+      tor_asprintf(&next_path, "%s"PATH_SEPARATOR"%s", current_path,
+                   &pattern[curr_sep+1]);
+      smartlist_t *opened_next = get_glob_paths(next_path, unglob, final);
+      tor_free(next_path);
+      if (!opened_next) {
+        error_found = true;
+        break;
+      }
+      smartlist_add_all(results, opened_next);
+      smartlist_free(opened_next);
+    } SMARTLIST_FOREACH_END(current_path);
+    SMARTLIST_FOREACH(unglobbed_paths, char *, p, tor_free(p));
+    smartlist_free(unglobbed_paths);
+  }
+
+  if (error_found) {
+    SMARTLIST_FOREACH(results, char *, p, tor_free(p));
+    smartlist_free(results);
+    results = NULL;
+  }
+
+  return results;
 }
-#endif /* !(defined(_WIN32)) */
 
 #ifdef _WIN32
 static struct smartlist_t *
@@ -379,83 +448,26 @@ unglob_win32(const char *pattern, int prev_sep, int curr_sep)
   tor_free(path_until_glob);
   return results;
 }
-#endif  /* defined(_WIN32) */
-
-static bool
-add_non_glob_path(const char *path, struct smartlist_t *results)
+#else /* !defined(_WIN32) */
+/** Same as opendir but calls sandbox_intern_string before */
+static DIR *
+prot_opendir(const char *name)
 {
-  file_status_t file_type = file_status(path);
-  if (file_type == FN_ERROR) {
-    return false;
-  } else if (file_type != FN_NOENT) {
-    char *to_add = tor_strdup(path);
-    clean_fname_for_stat(to_add);
-    smartlist_add(results, to_add);
-  }
-  return true;
+  return opendir(sandbox_intern_string(name));
 }
 
-#ifdef _WIN32
-static struct smartlist_t *
-tor_glob_win32(const char *pattern)
+/** Same as stat but calls sandbox_intern_string before */
+static int
+prot_stat(const char *pathname, struct stat *buf)
 {
-  smartlist_t *results = smartlist_new();
-  int i, prev_sep = -1, curr_sep = -1;
-  bool is_glob = false, error_found = false, is_sep = false, is_last = false;
+  return stat(sandbox_intern_string(pathname), buf);
+}
 
-  // search for first path fragment with globs
-  for (i = 0; pattern[i]; i++) {
-    is_glob = is_glob || IS_GLOB_CHAR(pattern, i);
-    is_last = !pattern[i+1];
-    is_sep = pattern[i] == *PATH_SEPARATOR || pattern[i] == '/';
-    if (is_sep || is_last) {
-      prev_sep = curr_sep;
-      curr_sep = i;
-      if (is_glob) {
-        break;
-      }
-    }
-  }
-
-  if (!is_glob) {
-    if (!add_non_glob_path(pattern, results)) {
-      SMARTLIST_FOREACH(results, char *, p, tor_free(p));
-      smartlist_free(results);
-      results = NULL;
-    }
-    return results;
-  }
-
-  smartlist_t *unglobbed_paths = unglob_win32(pattern, prev_sep, curr_sep);
-  if (!unglobbed_paths) {
-    error_found = true;
-  } else {
-    // for each path for current fragment, add the rest of the pattern
-    // and call recursively to get all opened paths
-    SMARTLIST_FOREACH_BEGIN(unglobbed_paths, char *, current_path) {
-      char *next_path;
-      tor_asprintf(&next_path, "%s"PATH_SEPARATOR"%s", current_path,
-                   &pattern[curr_sep+1]);
-      smartlist_t *opened_next = tor_glob_win32(next_path);
-      tor_free(next_path);
-      if (!opened_next) {
-        error_found = true;
-        break;
-      }
-      smartlist_add_all(results, opened_next);
-      smartlist_free(opened_next);
-    } SMARTLIST_FOREACH_END(current_path);
-    SMARTLIST_FOREACH(unglobbed_paths, char *, p, tor_free(p));
-    smartlist_free(unglobbed_paths);
-  }
-
-  if (error_found) {
-    SMARTLIST_FOREACH(results, char *, p, tor_free(p));
-    smartlist_free(results);
-    results = NULL;
-  }
-
-  return results;
+/** Same as lstat but calls sandbox_intern_string before */
+static int
+prot_lstat(const char *pathname, struct stat *buf)
+{
+  return lstat(sandbox_intern_string(pathname), buf);
 }
 #endif /* defined(_WIN32) */
 
@@ -470,7 +482,7 @@ tor_glob(const char *pattern)
   // PathMatchSpec does not support forward slashes, change them to backslashes
   char *pattern_normalized = tor_strdup(pattern);
   tor_strreplacechar(pattern_normalized, '/', *PATH_SEPARATOR);
-  result = tor_glob_win32(pattern_normalized);
+  result = get_glob_paths(pattern_normalized, unglob_win32, true);
   tor_free(pattern_normalized);
 #else /* !(defined(_WIN32)) */
   glob_t matches;
@@ -524,7 +536,7 @@ has_glob(const char *s)
 }
 
 static struct smartlist_t *
-unglob_posix(const char *pattern, int prev_sep, int curr_sep)
+unglob_opened_files(const char *pattern, int prev_sep, int curr_sep)
 {
   (void)prev_sep;
   smartlist_t *results = smartlist_new();
@@ -552,67 +564,5 @@ unglob_posix(const char *pattern, int prev_sep, int curr_sep)
 struct smartlist_t *
 get_glob_opened_files(const char *pattern)
 {
-  smartlist_t *results = smartlist_new();
-  int i, prev_sep = -1, curr_sep = -1;
-  bool is_glob = false, error_found = false, is_sep = false, is_last = false;
-
-  // search for first path fragment with globs
-  for (i = 0; pattern[i]; i++) {
-    is_glob = is_glob || IS_GLOB_CHAR(pattern, i);
-    is_last = !pattern[i+1];
-    is_sep = pattern[i] == *PATH_SEPARATOR || pattern[i] == '/';
-    if (is_sep || is_last) {
-      prev_sep = curr_sep;
-      curr_sep = i;
-      if (is_glob) {
-        break;
-      }
-    }
-  }
-
-  if (!is_glob) {
-    return results;
-  }
-
-  // add path before the glob to results
-  int len = prev_sep < 1 ? prev_sep + 1 : prev_sep; // handle /*
-  char *path_until_glob = tor_strndup(pattern, len);
-  smartlist_add(results, path_until_glob);
-
-  smartlist_t *unglobbed_paths = unglob_posix(pattern, prev_sep, curr_sep);
-  if (!unglobbed_paths) {
-    error_found = true;
-  } else {
-    // for each path for current fragment, add the rest of the pattern
-    // and call recursively to get all opened paths
-    SMARTLIST_FOREACH_BEGIN(unglobbed_paths, char *, current_path) {
-      if (!is_dir(file_status(current_path))) {
-        // file_status needs the string interned or we get a warning
-        smartlist_add_strdup(results, current_path);
-        continue;
-      }
-
-      char *next_path;
-      tor_asprintf(&next_path, "%s"PATH_SEPARATOR"%s", current_path,
-                   &pattern[curr_sep+1]);
-      smartlist_t *opened_next = get_glob_opened_files(next_path);
-      tor_free(next_path);
-      if (!opened_next) {
-        error_found = true;
-        break;
-      }
-      smartlist_add_all(results, opened_next);
-      smartlist_free(opened_next);
-    } SMARTLIST_FOREACH_END(current_path);
-    SMARTLIST_FOREACH(unglobbed_paths, char *, p, tor_free(p));
-    smartlist_free(unglobbed_paths);
-  }
-
-  if (error_found) {
-    SMARTLIST_FOREACH(results, char *, p, tor_free(p));
-    smartlist_free(results);
-    results = NULL;
-  }
-
-  return results;
+  return get_glob_paths(pattern, unglob_opened_files, false);
 }
