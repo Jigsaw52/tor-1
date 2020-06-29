@@ -823,6 +823,9 @@ sandbox_init_filter(void)
 #define OPEN(name)                              \
   sandbox_cfg_allow_open_filename(&cfg, tor_strdup(name))
 
+#define OPENDIR(dir)                            \
+  sandbox_cfg_allow_opendir_dirname(&cfg, tor_strdup(dir))
+
 #define OPEN_DATADIR(name)                      \
   sandbox_cfg_allow_open_filename(&cfg, get_datadir_fname(name))
 
@@ -840,7 +843,7 @@ sandbox_init_filter(void)
   } while (0)
 
 #define OPEN_KEY_DIRECTORY() \
-  sandbox_cfg_allow_open_filename(&cfg, tor_strdup(options->KeyDirectory))
+  OPENDIR(options->KeyDirectory)
 #define OPEN_CACHEDIR(name)                      \
   sandbox_cfg_allow_open_filename(&cfg, get_cachedir_fname(name))
 #define OPEN_CACHEDIR_SUFFIX(name, suffix) do {  \
@@ -854,7 +857,7 @@ sandbox_init_filter(void)
     OPEN_KEYDIR(name suffix);                    \
   } while (0)
 
-  OPEN(options->DataDirectory);
+  OPENDIR(options->DataDirectory);
   OPEN_KEY_DIRECTORY();
 
   OPEN_CACHEDIR_SUFFIX("cached-certs", ".tmp");
@@ -901,7 +904,11 @@ sandbox_init_filter(void)
   }
 
   SMARTLIST_FOREACH(options->FilesOpenedByIncludes, char *, f, {
-    OPEN(f);
+    if (file_status(f) == FN_DIR) {
+      OPENDIR(f);
+    } else {
+      OPEN(f);
+    }
   });
 
 #define RENAME_SUFFIX(name, suffix)        \
@@ -1014,7 +1021,7 @@ sandbox_init_filter(void)
      * directory that holds it. */
     char *dirname = tor_strdup(port->unix_addr);
     if (get_parent_directory(dirname) == 0) {
-      OPEN(dirname);
+      OPENDIR(dirname);
     }
     tor_free(dirname);
     sandbox_cfg_allow_chmod_filename(&cfg, tor_strdup(port->unix_addr));
