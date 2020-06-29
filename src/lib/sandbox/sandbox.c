@@ -486,6 +486,24 @@ libc_uses_openat_for_opendir(void)
          (is_libc_at_least(2, 15) && !is_libc_at_least(2, 22));
 }
 
+/* Return true if we think we're running with a libc that needs to cast
+ * negative arguments like AT_FDCWD for seccomp rules. */
+static int
+libc_negative_constant_needs_cast(void)
+{
+  return is_libc_at_least(2, 27);
+}
+
+static struct scmp_arg_cmp
+scmp_cmp_AT_FDCWD(int a, enum scmp_compare op)
+{
+  if (libc_negative_constant_needs_cast()) {
+    return SCMP_CMP(a, op, (unsigned int)AT_FDCWD);
+  } else {
+    return SCMP_CMP_STR(a, op, AT_FDCWD);
+  }
+}
+
 /** Allow a single file to be opened.  If <b>use_openat</b> is true,
  * we're using a libc that remaps all the opens into openats. */
 static int
@@ -493,7 +511,7 @@ allow_file_open(scmp_filter_ctx ctx, int use_openat, const char *file)
 {
   if (use_openat) {
     return seccomp_rule_add_2(ctx, SCMP_ACT_ALLOW, SCMP_SYS(openat),
-                              SCMP_CMP(0, SCMP_CMP_EQ, (unsigned int)AT_FDCWD),
+                              scmp_cmp_AT_FDCWD(0, SCMP_CMP_EQ),
                               SCMP_CMP_STR(1, SCMP_CMP_EQ, file));
   } else {
     return seccomp_rule_add_1(ctx, SCMP_ACT_ALLOW, SCMP_SYS(open),
@@ -629,7 +647,7 @@ sb_openat(scmp_filter_ctx ctx, sandbox_cfg_t *filter)
     if (param != NULL && param->prot == 1 && param->syscall
         == SCMP_SYS(openat)) {
       rc = seccomp_rule_add_3(ctx, SCMP_ACT_ALLOW, SCMP_SYS(openat),
-          SCMP_CMP(0, SCMP_CMP_EQ, AT_FDCWD),
+          scmp_cmp_AT_FDCWD(0, SCMP_CMP_EQ),
           SCMP_CMP_STR(1, SCMP_CMP_EQ, param->value),
           SCMP_CMP(2, SCMP_CMP_EQ, O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_DIRECTORY|
               O_CLOEXEC));
@@ -658,7 +676,7 @@ sb_opendir(scmp_filter_ctx ctx, sandbox_cfg_t *filter)
         == PHONY_OPENDIR_SYSCALL) {
       if (libc_uses_openat_for_opendir()) {
         rc = seccomp_rule_add_3(ctx, SCMP_ACT_ALLOW, SCMP_SYS(openat),
-            SCMP_CMP(0, SCMP_CMP_EQ, AT_FDCWD),
+            scmp_cmp_AT_FDCWD(0, SCMP_CMP_EQ),
             SCMP_CMP_STR(1, SCMP_CMP_EQ, param->value),
             SCMP_CMP(2, SCMP_CMP_EQ, O_RDONLY|O_NONBLOCK|O_LARGEFILE|
                 O_DIRECTORY|O_CLOEXEC));
